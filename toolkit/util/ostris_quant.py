@@ -216,12 +216,20 @@ def save_quantized_layers(
 
 
 @torch.no_grad()
-def load_quantized_layers(root: torch.nn.Module, file_path: str) -> int:
+def load_quantized_layers(
+    root: torch.nn.Module,
+    file_path: str,
+    state_dict: Optional[Dict[str, torch.Tensor]] = None,
+) -> int:
     """Apply a file written by save_quantized_layers onto a model: restores the
     backend buffers (and bias) of each recorded module. Target modules may
     already be OstrisLinear (model quantized on load — buffers are replaced) or
     still plain nn.Linear (converted in place, no quantization math needed).
-    Returns the number of modules restored."""
+    Returns the number of modules restored.
+
+    ``state_dict`` may pass the file's already-loaded tensors to skip a second
+    read; the metadata is still read from ``file_path``. Consumed keys are
+    popped from the passed dict."""
     import json
     from safetensors import safe_open
     from safetensors.torch import load_file
@@ -231,17 +239,31 @@ def load_quantized_layers(root: torch.nn.Module, file_path: str) -> int:
     if QUANT_LAYERS_METADATA_KEY not in meta:
         raise ValueError(f"{file_path} has no quantized-layer metadata")
     quant_map = json.loads(meta[QUANT_LAYERS_METADATA_KEY])["modules"]
-    state_dict = load_file(file_path)
+    if state_dict is None:
+        state_dict = load_file(file_path)
 
     for name, entry in quant_map.items():
         module = root.get_submodule(name)
         quantizer = get_ostris_quantizer(entry["qtype"])
         if quantizer is None:
             raise ValueError(f"Unknown qtype '{entry['qtype']}' in {file_path}")
-        # figure out the device the module currently lives on
+        # figure out the device the module currently lives on; meta tensors
+        # (e.g. a weight awaiting replacement on a meta-built model) say
+        # nothing about where the module lives
         ref = next(
-            (t for t in module._parameters.values() if t is not None),
-            next((t for t in module._buffers.values() if t is not None), None),
+            (
+                t
+                for t in module._parameters.values()
+                if t is not None and not t.is_meta
+            ),
+            next(
+                (
+                    t
+                    for t in module._buffers.values()
+                    if t is not None and not t.is_meta
+                ),
+                None,
+            ),
         )
         device = ref.device if ref is not None else torch.device("cpu")
         if isinstance(module, OstrisLinear):

@@ -45,6 +45,7 @@ from toolkit.samplers.custom_flowmatch_sampler import (
 from toolkit.accelerator import unwrap_model
 from toolkit.metadata import get_meta_for_safetensors
 from toolkit.util.quantize import quantize, get_qtype, quantize_model
+from toolkit.util.quantized_cache import apply_quantized_cache
 from toolkit.memory_management import MemoryManager
 
 from .src.mmdit import (
@@ -242,6 +243,23 @@ class Krea2Model(BaseModel):
         with torch.device("meta"):
             transformer = SingleStreamDiT(config)
 
+        cache_path = self.model_config.quantized_cache_path
+        if cache_path is not None:
+            if not os.path.isfile(cache_path):
+                raise FileNotFoundError(
+                    f"model.quantized_cache_path does not exist: {cache_path}"
+                )
+            self.print_and_status_update("  - loading pre-quantized transformer cache")
+            restored = apply_quantized_cache(
+                transformer,
+                cache_path,
+                cast_dtype=dtype,
+                expected_qtype=self.model_config.qtype,
+            )
+            self.print_and_status_update(f"  - restored {restored} quantized layers")
+            flush()
+            return transformer
+
         self.print_and_status_update("  - fetching transformer weights")
         state_dict = _load_mmdit_state_dict(
             self.model_config.name_or_path,
@@ -406,12 +424,26 @@ class Krea2Model(BaseModel):
 
         # load assistant lora if specified
         if self.model_config.assistant_lora_path is not None:
+            if self.model_config.quantized_cache_path is not None:
+                raise ValueError(
+                    "assistant_lora_path cannot be combined with "
+                    "quantized_cache_path: the adapter merges into full "
+                    "precision weights before quantization."
+                )
             self.load_training_adapter(transformer)
             # set qtype to be float8 if it is qfloat8
             if self.model_config.qtype == "qfloat8":
                 self.model_config.qtype = "float8"
 
-        if self.model_config.quantize:
+        if self.model_config.quantized_cache_path is not None:
+            # already restored pre-quantized in _load_transformer
+            if self.model_config.accuracy_recovery_adapter is not None:
+                raise ValueError(
+                    "accuracy_recovery_adapter cannot be combined with "
+                    "quantized_cache_path: the adapter attaches during "
+                    "quantize-at-load, which the cache replaces."
+                )
+        elif self.model_config.quantize:
             self.print_and_status_update("Quantizing transformer")
             quantize_model(self, transformer)
             flush()
