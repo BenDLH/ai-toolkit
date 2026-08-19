@@ -51,6 +51,13 @@ class OstrisQuantizer:
         """Reconstruct the full weight in the original basis, in float32."""
         raise NotImplementedError
 
+    def dequantize_folded(self, module: "OstrisLinear") -> torch.Tensor:
+        """The full weight with any ACTIVATION-side transform folded in, i.e. a
+        weight that computes the same output on raw activations. Used when
+        re-quantizing into a different backend (which won't know about this
+        backend's activation transforms). Default: same as dequantize."""
+        return self.dequantize(module)
+
     def requantize_(self, module: "OstrisLinear", fp_weight: torch.Tensor) -> None:
         """Re-quantize in place from a full precision weight in the original basis
         (used by the continuous merge/reset method)."""
@@ -120,18 +127,66 @@ class OstrisLinear(torch.nn.Linear):
         self.ostris_quantizer.requantize_(self, fp_weight)
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
-        # emit a plain full precision weight so full-model saves need no special casing
-        destination[prefix + "weight"] = self.dequantize_weight()
+        # emit a lazy stand-in instead of the materialized weight: a full-model
+        # state_dict() would otherwise hold every layer's dequantized weight on the
+        # gpu at once (OOM on large models). save loops dequantize per key via
+        # dequantize_if_quantized, mirroring how torchao state dicts are consumed
+        destination[prefix + "weight"] = OstrisLazyWeight(self)
         if self.bias is not None:
             destination[prefix + "bias"] = (
                 self.bias if keep_vars else self.bias.detach()
             )
 
 
+class OstrisLazyWeight(torch.Tensor):
+    """Lazy weight stand-in emitted by OstrisLinear._save_to_state_dict.
+
+    Reports the real shape/dtype/device but holds no data; .dequantize()
+    materializes the full weight from the module's quantized buffers. This is a
+    live view of the module (not a snapshot), which is fine for the save paths
+    state dicts feed: they consume each key once via dequantize_if_quantized.
+    Any other tensor op falls through __torch_dispatch__ and materializes first.
+    """
+
+    @staticmethod
+    def __new__(cls, module: "OstrisLinear"):
+        buf = next(b for b in module._buffers.values() if b is not None)
+        r = torch.Tensor._make_wrapper_subclass(
+            cls,
+            (module.out_features, module.in_features),
+            dtype=module.ostris_orig_dtype,
+            device=buf.device,
+            requires_grad=False,
+        )
+        r._ostris_module = module
+        # routes is_quantized_tensor/dequantize_if_quantized (toolkit/util/quantize.py)
+        r._is_ostris_weight = True
+        return r
+
+    def dequantize(self) -> torch.Tensor:
+        return self._ostris_module.dequantize_weight()
+
+    def __repr__(self):
+        return (
+            f"OstrisLazyWeight(shape={tuple(self.shape)}, dtype={self.dtype}, "
+            f"device={self.device})"
+        )
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+        from torch.utils._pytree import tree_map
+
+        def unwrap(t):
+            return t._ostris_module.dequantize_weight() if isinstance(t, cls) else t
+
+        return func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs or {}))
+
+
 def get_ostris_quantizer(qtype: str) -> Optional[OstrisQuantizer]:
     """Resolve a qtype string to a quantizer backend instance, or None if the qtype
     does not belong to a custom backend. Add new backends here."""
     from toolkit.util.convrot_quant import CONVROT_QTYPES, get_convrot_quantizer
+    from toolkit.util.nvfp4_quant import NVFP4_QTYPES, Nvfp4Quantizer
     from toolkit.util.orbit_quant import ORBIT_QTYPES, OrbitQuantizer
     from toolkit.util.orbit_vq_quant import ORBIT_VQ_QTYPES, OrbitVQQuantizer
     from toolkit.util.uintx_quant import UINTX_QTYPES, UIntXQuantizer
@@ -143,6 +198,8 @@ def get_ostris_quantizer(qtype: str) -> Optional[OstrisQuantizer]:
         quantizer = OrbitVQQuantizer(**ORBIT_VQ_QTYPES[qtype])
     elif qtype in CONVROT_QTYPES:
         quantizer = get_convrot_quantizer(qtype)
+    elif qtype in NVFP4_QTYPES:
+        quantizer = Nvfp4Quantizer()
     elif qtype in UINTX_QTYPES:
         quantizer = UIntXQuantizer(UINTX_QTYPES[qtype])
     if quantizer is not None:
@@ -299,8 +356,33 @@ def convert_linear_to_ostris(
     module: torch.nn.Linear, quantizer: OstrisQuantizer
 ) -> bool:
     """Quantize an nn.Linear in place (class swap). Returns True if the module was
-    converted (or already was), False if it is not a candidate."""
+    converted (or already was), False if it is not a candidate.
+
+    A module that is ALREADY quantized (e.g. loaded from a pre-quantized
+    checkpoint) is re-quantized into the requested backend when the qtypes
+    differ: the weight is dequantized and re-quantized layer by layer, so the
+    full-precision transient never exceeds one layer's weight. Same qtype is
+    a no-op (the shipped quantization is kept)."""
     if isinstance(module, OstrisLinear):
+        current_qtype = getattr(module.ostris_quantizer, "qtype", None)
+        if quantizer.qtype is None or current_qtype == quantizer.qtype:
+            return True
+        if not quantizer.can_quantize(module):
+            return True  # keep the existing quantization rather than dropping it
+        # fold any activation-side transform (e.g. an AWQ pre_quant_scale) into
+        # the weight so the new backend computes the same function on raw inputs
+        weight = module.ostris_quantizer.dequantize_folded(module).to(
+            module.ostris_orig_dtype
+        )
+        # backend state lives exclusively in buffers; leftover scalar attrs from
+        # the old backend are inert
+        module._buffers.clear()
+        if quantizer.wants_fp32_weight:
+            quantizer.quantize_(module, weight.to(torch.float32))
+        else:
+            quantizer.quantize_(module, weight)
+        del weight
+        module.ostris_quantizer = quantizer
         return True
     weight = getattr(module, "weight", None)
     if not isinstance(weight, torch.nn.Parameter) or not weight.dtype.is_floating_point:

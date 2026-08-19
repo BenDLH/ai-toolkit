@@ -26,7 +26,7 @@ def factorization(dimension: int, factor: int = -1) -> tuple[int, int]:
     In LoRA with Kroneckor Product, first value is a value for weight scale.
     secon value is a value for weight.
 
-    Becuase of non-commutative property, A⊗B ≠ B⊗A. Meaning of two matrices is slightly different.
+    Becuase of non-commutative property, A(kron)B != B(kron)A. Meaning of two matrices is slightly different.
 
     examples)
     factor
@@ -151,7 +151,7 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
                     torch.empty(shape[0][1], lora_dim))
                 self.lokr_w2_b = nn.Parameter(torch.empty(
                     lora_dim, shape[1][1]*shape[2]*shape[3]))
-                # w1 ⊗ (w2_a x w2_b) = (a, b)⊗((c, dim)x(dim, d*k1*k2)) = (a, b)⊗(c, d*k1*k2) = (ac, bd*k1*k2)
+                # w1 (kron) (w2_a x w2_b) = (a, b)(kron)((c, dim)x(dim, d*k1*k2)) = (a, b)(kron)(c, d*k1*k2) = (ac, bd*k1*k2)
 
             self.op = F.conv2d
             self.extra_args = {
@@ -191,7 +191,7 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
                     torch.empty(shape[0][1], lora_dim))
                 self.lokr_w2_b = nn.Parameter(
                     torch.empty(lora_dim, shape[1][1]))
-                # w1 ⊗ (w2_a x w2_b) = (a, b)⊗((c, dim)x(dim, d)) = (a, b)⊗(c, d) = (ac, bd)
+                # w1 (kron) (w2_a x w2_b) = (a, b)(kron)((c, dim)x(dim, d)) = (a, b)(kron)(c, d) = (ac, bd)
             else:
                 self.use_w2 = True
                 self.lokr_w2 = nn.Parameter(
@@ -212,7 +212,7 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
         if self.use_w2 and self.use_w1:
             # use scale = 1
             alpha = lora_dim
-        self.scale = float(alpha) / self.lora_dim
+        self._set_runtime_scale(float(alpha) / self.lora_dim)
         self.register_buffer('alpha', torch.tensor(alpha))  # treat as constant
 
         if self.use_w2:
@@ -251,7 +251,7 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
             (self.lokr_w2 if self.use_w2
              else make_weight_cp(self.lokr_t2, self.lokr_w2_a, self.lokr_w2_b) if self.cp
              else self.lokr_w2_a@self.lokr_w2_b),
-            self.scale
+            self._runtime_scale
         )
         if orig_weight is not None:
             weight = weight.reshape(orig_weight.shape)
@@ -382,7 +382,7 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
 
         # scale folded into A (not applied to the reduction output) to avoid
         # an inductor lowering bug under torch.compile
-        delta = torch.einsum('...qo,pq->...po', tmp, A * self.scale)  # (..., out_l, out_k)
+        delta = torch.einsum('...qo,pq->...po', tmp, A * self._runtime_scale)  # (..., out_l, out_k)
         delta = delta.flatten(-2, -1)
 
         if self.training and self.rank_dropout:
