@@ -685,6 +685,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 )
 
         # save learnable params as json if we have thim
+        # sidecar writers below must not touch file_path — it still means the
+        # checkpoint this save produced, and post_save_hook receives it
         if self.snr_gos:
             json_data = {
                 'offset_1': self.snr_gos.offset_1.item(),
@@ -692,23 +694,22 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 'scale': self.snr_gos.scale.item(),
                 'gamma': self.snr_gos.gamma.item(),
             }
-            path_to_save = file_path = os.path.join(self.save_root, 'learnable_snr.json')
+            path_to_save = os.path.join(self.save_root, 'learnable_snr.json')
             with open(path_to_save, 'w') as f:
                 json.dump(json_data, f, indent=4)
-        
+
         print_acc(f"Saved checkpoint to {file_path}")
 
         # save optimizer
         if self.optimizer is not None:
             try:
-                filename = f'optimizer.pt'
-                file_path = os.path.join(self.save_root, filename)
+                optimizer_path = os.path.join(self.save_root, 'optimizer.pt')
                 try:
                     state_dict = unwrap_model(self.optimizer).state_dict()
                 except Exception as e:
                     state_dict = self.optimizer.state_dict()
-                torch.save(state_dict, file_path)
-                print_acc(f"Saved optimizer to {file_path}")
+                torch.save(state_dict, optimizer_path)
+                print_acc(f"Saved optimizer to {optimizer_path}")
             except Exception as e:
                 print_acc(e)
                 print_acc("Could not save optimizer")
