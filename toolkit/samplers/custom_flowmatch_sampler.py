@@ -192,6 +192,30 @@ class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             self.timesteps = timesteps.to(device=device)
             return timesteps
 
+        elif timestep_type == 'logit_normal_shift':
+            # Logit-normal draws under the resolution-dependent shift. 'shift'
+            # shifts an evenly spaced grid instead, which keeps far more of the
+            # samples at the noisy end.
+            if latents is None:
+                raise ValueError('latents is None')
+
+            image_seq_len = latents.shape[2] * latents.shape[3] // (patch_size**2)
+            mu = calculate_shift(
+                image_seq_len,
+                self.config.get("base_image_seq_len", 256),
+                self.config.get("max_image_seq_len", 4096),
+                self.config.get("base_shift", 0.5),
+                self.config.get("max_shift", 1.16),
+            )
+            sigmas = torch.sigmoid(torch.randn((num_timesteps,), device=device))
+            sigmas = self.time_shift(mu, 1.0, sigmas)
+            sigmas, _ = torch.sort(sigmas, descending=True)
+            timesteps = sigmas * self.config.num_train_timesteps
+
+            self.timesteps = timesteps
+            self.sigmas = torch.cat([sigmas, torch.zeros(1, device=device)])
+            return timesteps
+
         elif timestep_type == 'lognorm_blend':
             # disgtribute timestepd to the center/early and blend in linear
             alpha = 0.75

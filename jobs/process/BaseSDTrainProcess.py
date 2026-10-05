@@ -802,6 +802,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 use_feedback=self.train_config.ema_config.use_feedback,
                 param_multiplier=self.train_config.ema_config.param_multiplier,
             )
+            print_acc(f"EMA enabled: decay {self.train_config.ema_config.ema_decay} over {len(params)} tensors")
             # expose to the model: models that run an EMA-teacher forward during training
             # (e.g. wan21_pixel self_flow) read it from here
             self.sd.ema = self.ema

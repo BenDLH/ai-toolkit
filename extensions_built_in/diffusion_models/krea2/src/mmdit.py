@@ -119,6 +119,13 @@ class SingleMMDiTConfig:
     txtheads: int = 20
     txtkvheads: int = 20
 
+    # BaseSDTrainProcess counts image tokens with `config.patch_size` for the
+    # shifted timestep types; without it the count falls back to patch 1, 4x
+    # too many tokens.
+    @property
+    def patch_size(self) -> int:
+        return self.patch
+
 
 class SimpleModulation(torch.nn.Module):
     def __init__(self, dim: int):
