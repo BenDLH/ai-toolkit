@@ -99,7 +99,9 @@ class SDTrainer(BaseSDTrainProcess):
                 raise ValueError("diff_output_preservation requires a network to be set")
             if self.train_config.train_text_encoder:
                 raise ValueError("diff_output_preservation is not supported with train_text_encoder")
-        
+            print_acc(f"DOP: a preservation pass every {self.train_config.diff_output_preservation_every} "
+                      f"step(s) at x{self.train_config.diff_output_preservation_multiplier:g}")
+
         if self.train_config.blank_prompt_preservation:
             if self.network_config is None:
                 raise ValueError("blank_prompt_preservation requires a network to be set")
@@ -1775,7 +1777,7 @@ class SDTrainer(BaseSDTrainProcess):
                                     trigger = file_item.trigger_word if file_item.trigger_word is not None else self.trigger_word
                                     if trigger is None:
                                         return prompt
-                                    return prompt.replace(trigger, self.train_config.diff_output_preservation_class)
+                                    return prompt.replace(trigger, file_item.dataset_config.diff_output_preservation_class)
                                 dop_prompts = [replace_trigger_with_class(p, fi) for p, fi in zip(conditioned_prompts, batch.file_items)]
                                 dop_prompts_2 = None
                                 if prompt_2 is not None:
@@ -1965,6 +1967,12 @@ class SDTrainer(BaseSDTrainProcess):
 
                 prior_pred = None
 
+                preservation_due = (
+                    not self.train_config.diff_output_preservation
+                    or self.step_num % self.train_config.diff_output_preservation_every == 0
+                )
+                do_prior_now = self.do_prior_prediction and (preservation_due or self.train_config.do_prior_divergence)
+
                 do_inverted_masked_prior = False
                 if self.train_config.inverted_mask_prior and batch.mask_tensor is not None:
                     do_inverted_masked_prior = True
@@ -1980,7 +1988,7 @@ class SDTrainer(BaseSDTrainProcess):
                         do_guidance_prior = True
 
                 if ((
-                        has_adapter_img and self.assistant_adapter and match_adapter_assist) or self.do_prior_prediction or do_guidance_prior or do_reg_prior or do_inverted_masked_prior or self.train_config.correct_pred_norm):
+                        has_adapter_img and self.assistant_adapter and match_adapter_assist) or do_prior_now or do_guidance_prior or do_reg_prior or do_inverted_masked_prior or self.train_config.correct_pred_norm):
                     with self.timer('prior predict'):
                         prior_embeds_to_use = conditional_embeds
                         # use diff_output_preservation embeds if doing dfe
@@ -2179,7 +2187,7 @@ class SDTrainer(BaseSDTrainProcess):
                             prior_pred=prior_to_calculate_loss,
                         )
                     
-                    if self.train_config.diff_output_preservation or self.train_config.blank_prompt_preservation:
+                    if (self.train_config.diff_output_preservation and preservation_due) or self.train_config.blank_prompt_preservation:
                         with torch.no_grad():
                             if self.train_config.diff_output_preservation:
                                 preservation_embeds = self.diff_output_preservation_embeds.expand_to_batch(noisy_latents.shape[0])

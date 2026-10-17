@@ -491,7 +491,11 @@ class TrainConfig:
         self.diff_output_preservation_multiplier = kwargs.get('diff_output_preservation_multiplier', 1.0)
         # If the trigger word is in the prompt, we will use this class name to replace it eg. "sks woman" -> "woman"
         self.diff_output_preservation_class = kwargs.get('diff_output_preservation_class', '')
-        
+        # run the preservation pass only on every Nth step; raise the multiplier by N to keep the same average pull
+        self.diff_output_preservation_every = int(kwargs.get('diff_output_preservation_every', 1))
+        if self.diff_output_preservation_every < 1:
+            raise ValueError("diff_output_preservation_every must be at least 1")
+
         # blank prompt preservation will preserve the model's knowledge of a blank prompt
         self.blank_prompt_preservation = kwargs.get('blank_prompt_preservation', False)
         self.blank_prompt_preservation_multiplier = kwargs.get('blank_prompt_preservation_multiplier', 1.0)

@@ -155,18 +155,22 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 raw_dataset['cache_text_embeddings'] = True
 
         # pass diff output preservation to the datasets so the data loader can build
-        # and cache the DOP caption (dataset trigger word replaced with the class)
+        # and cache the DOP caption (dataset trigger word replaced with the class).
+        # A dataset that names its own class keeps it: one lora can hold a woman and a man.
         if self.train_config.diff_output_preservation and raw_datasets is not None:
             for raw_dataset in raw_datasets:
                 raw_dataset['diff_output_preservation'] = True
-                raw_dataset['diff_output_preservation_class'] = self.train_config.diff_output_preservation_class
-        
+                raw_dataset.setdefault('diff_output_preservation_class', self.train_config.diff_output_preservation_class)
+
         if raw_datasets is not None and len(raw_datasets) > 0:
             for raw_dataset in raw_datasets:
                 dataset = DatasetConfig(**raw_dataset)
                 # handle trigger word per dataset
                 if dataset.trigger_word is None and self.trigger_word is not None:
                     dataset.trigger_word = self.trigger_word
+                if dataset.diff_output_preservation:
+                    print_acc(f"DOP: {dataset.folder_path}: '{dataset.trigger_word}' is held to "
+                              f"'{dataset.diff_output_preservation_class}' without it")
                 is_caching = dataset.cache_latents or dataset.cache_latents_to_disk
                 if not is_caching:
                     self.is_latents_cached = False
