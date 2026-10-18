@@ -1972,6 +1972,7 @@ class SDTrainer(BaseSDTrainProcess):
                     or self.step_num % self.train_config.diff_output_preservation_every == 0
                 )
                 do_prior_now = self.do_prior_prediction and (preservation_due or self.train_config.do_prior_divergence)
+                preservation_backward_done = False
 
                 do_inverted_masked_prior = False
                 if self.train_config.inverted_mask_prior and batch.mask_tensor is not None:
@@ -2188,6 +2189,14 @@ class SDTrainer(BaseSDTrainProcess):
                         )
                     
                     if (self.train_config.diff_output_preservation and preservation_due) or self.train_config.blank_prompt_preservation:
+                        # backpropagate the main loss before the preservation forward: its graph is
+                        # freed first, where one combined backward held both and overran a 24 GB card
+                        if torch.isfinite(loss):
+                            self.accelerator.backward(loss * loss_multiplier.mean())
+                        else:
+                            print_acc("loss is nan")
+                        loss = loss.detach()
+                        preservation_backward_done = True
                         with torch.no_grad():
                             if self.train_config.diff_output_preservation:
                                 preservation_embeds = self.diff_output_preservation_embeds.expand_to_batch(noisy_latents.shape[0])
@@ -2224,7 +2233,14 @@ class SDTrainer(BaseSDTrainProcess):
                             self.additional_logs['loss/preservation_audio'] = audio_preservation_loss.item()
                             preservation_loss = preservation_loss + audio_preservation_loss
 
-                        loss = loss + preservation_loss
+                        if torch.isfinite(preservation_loss):
+                            self.accelerator.backward(preservation_loss * loss_multiplier.mean())
+                        else:
+                            print_acc("preservation loss is nan")
+                        loss = loss + preservation_loss.detach()
+
+                if preservation_backward_done:
+                    return (loss * loss_multiplier.mean()).detach()
 
                 # check if nan
                 if not torch.isfinite(loss):
